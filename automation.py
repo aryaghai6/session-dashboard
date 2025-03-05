@@ -1,163 +1,98 @@
-import streamlit as st
 import pandas as pd
-import plotly.express as px
+from openpyxl import load_workbook, Workbook
+from openpyxl.styles import PatternFill
+import re
+from datetime import datetime
 
-# Load Excel Data
-FILE_PATH = "C:/Users/asus/OneDrive - NIIT Limited/Automation/Destination_data.xlsx"
-df = pd.read_excel(FILE_PATH, sheet_name="Formatted Data", engine="openpyxl")
+def calculate_hours(session_time):
+    try:
+        # Extract start and end times using regex
+        match = re.search(r'(\d{1,2}:\d{2}\s*[APap][Mm])\s*-\s*(\d{1,2}:\d{2}\s*[APap][Mm])', str(session_time))
+        if match:
+            start_time = datetime.strptime(match.group(1), "%I:%M %p")
+            end_time = datetime.strptime(match.group(2), "%I:%M %p")
+            if end_time < start_time:
+                end_time += pd.Timedelta(days=1)  # Handle overnight sessions
+            duration = (end_time - start_time).total_seconds() / 3600  # Convert seconds to hours
+            return round(duration, 2)
+    except:
+        return None
+    return None
 
-# Data Cleaning
-df.columns = df.columns.str.strip()
-df["No.of Hours"] = pd.to_numeric(df["No.of Hours"], errors='coerce').fillna(0)
-df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
-df["Month"] = df["Date"].dt.month_name()
-df["Day"] = df["Date"].dt.day_name()
+def transfer_and_update_data(source_file, target_file, sheet_name):
+    columns = ["Date", "Day", "Session Time", "Client", "Program Name", "Batch", "Session Name",
+               "Mentor / Faculty", "Year", "Month", "Vendor Name", "No.of Hours", "Remarks"]
 
-# Define month order
-month_order = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December"
-]
+    # Read source Excel file
+    df = pd.read_excel(source_file, usecols=columns, dtype=str)
 
-# Streamlit UI
-st.set_page_config(page_title="📊 Session Dashboard", layout="wide")
+    # Convert Date column to datetime format and extract proper values
+    df["Date"] = pd.to_datetime(df["Date"], errors='coerce').dt.strftime('%Y-%m-%d')
+    df["Day"] = pd.to_datetime(df["Date"], errors='coerce').dt.day_name()
+    df["Year"] = pd.to_datetime(df["Date"], errors='coerce').dt.strftime('%Y')
+    df["Month"] = pd.to_datetime(df["Date"], errors='coerce').dt.strftime('%B')
+    df["Session Time"] = df["Session Time"].apply(lambda x: re.sub(r'\s*to\s*', ' - ', str(x)))
 
-# Authentication
-if "authenticated" not in st.session_state:
-    st.session_state.authenticated = False
+    # Sort data by Date and Session Time
+    df = df.sort_values(by=["Date", "Session Time"], ascending=[True, True])
 
-def login():
-    st.title("🔐 Login Page")
-    username = st.text_input("👤 Enter Username:")
-    password = st.text_input("🔑 Enter Password:", type="password")
-    if st.button("🔓 Login"):
-        if username.lower() == "arya" and password == "12345":
-            st.session_state.authenticated = True
-            st.success("✅ Login Successful!")
-            st.rerun()
-        else:
-            st.error("❌ Incorrect Username or Password!")
+    # Add Serial Number Column
+    df.insert(0, "S. No", range(1, len(df) + 1))
 
-if not st.session_state.authenticated:
-    login()
-    st.stop()
+    # Update No.of Hours if it's missing or zero
+    df["No.of Hours"] = df.apply(lambda row: calculate_hours(row["Session Time"]) if pd.isna(row["No.of Hours"]) or row["No.of Hours"] in [0, "0", ""] else row["No.of Hours"], axis=1)
 
-# Sidebar Navigation
-st.sidebar.title("📌 Navigation")
-page = st.sidebar.radio("Go to", ["📊 Dashboard", "📄 Data Viewer", "⚠️ Session Clashes"])
+    # Check if target file exists
+    try:
+        wb = load_workbook(target_file)
+    except FileNotFoundError:
+        wb = Workbook()
+        wb.save(target_file)  # Create file if not exists
 
-# 📊 Dashboard Page
-if page == "📊 Dashboard":
-    st.title("📊 Session Dashboard")
-
-    # Dropdown Filters
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        selected_month = st.selectbox(
-            "📅 Select Month",
-            ["All"] + [m for m in month_order if m in df["Month"].unique()]
-        )
-    
-    with col2:
-        selected_mentor = st.selectbox("👨‍🏫 Select Mentor", ["All"] + sorted(df["Mentor / Faculty"].dropna().unique()))
-    
-    with col3:
-        selected_program = st.selectbox("📚 Select Program", ["All"] + sorted(df["Program Name"].dropna().unique()))
-    
-    # Filter Data
-    filtered_df = df.copy()
-    if selected_month != "All":
-        filtered_df = filtered_df[filtered_df["Month"] == selected_month]
-    if selected_mentor != "All":
-        filtered_df = filtered_df[filtered_df["Mentor / Faculty"] == selected_mentor]
-    if selected_program != "All":
-        filtered_df = filtered_df[filtered_df["Program Name"] == selected_program]
-
-    # Display Metrics
-    total_sessions = len(filtered_df)
-    total_hours = filtered_df["No.of Hours"].sum()
-    st.markdown(f"📅 **Total Sessions in {selected_month}:** {total_sessions}")
-    st.markdown(f"⏳ **Total Hours:** {total_hours}")
-
-    # Display Chart
-    if not filtered_df.empty:
-        mentor_sessions = filtered_df["Mentor / Faculty"].value_counts().reset_index()
-        mentor_sessions.columns = ["Mentor / Faculty", "Sessions"]
-        fig = px.bar(mentor_sessions, x="Mentor / Faculty", y="Sessions", title="Sessions per Mentor", color="Sessions", text_auto=True)
-        st.plotly_chart(fig, use_container_width=True)
+    # Check if the sheet exists, if not create one
+    if sheet_name not in wb.sheetnames:
+        ws = wb.create_sheet(sheet_name)
     else:
-        st.warning("⚠️ No data available for the selected filters.")
+        ws = wb[sheet_name]
 
-# 📄 Data Viewer Page
-elif page == "📄 Data Viewer":
-    st.title("📄 View & Download Data")
+    # Save changes and close workbook
+    wb.save(target_file)
 
-    # Dropdown Filters
-    col1, col2 = st.columns(2)
-    with col1:
-        selected_month = st.selectbox(
-            "📅 Filter by Month",
-            ["All"] + [m for m in month_order if m in df["Month"].unique()],
-            key="month_view"
-        )
-    
-    with col2:
-        selected_mentor = st.selectbox(
-            "👨‍🏫 Filter by Mentor",
-            ["All"] + sorted(df["Mentor / Faculty"].dropna().unique()),
-            key="mentor_view"
-        )
-    
-    col3, col4 = st.columns(2)
-    with col3:
-        selected_day = st.selectbox(
-            "📆 Filter by Day",
-            ["All"] + sorted(df["Day"].dropna().unique()),
-            key="day_view"
-        )
-    
-    with col4:
-        selected_client = st.selectbox(
-            "🏢 Filter by Client",
-            ["All"] + sorted(df["Client"].dropna().unique()) if "Client" in df.columns else ["N/A"],
-            key="client_view"
-        )
+    # Load updated workbook again with Pandas
+    with pd.ExcelWriter(target_file, engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+        df.to_excel(writer, sheet_name=sheet_name, index=False)
 
-    # Apply Filters
-    filtered_data = df.copy()
-    if selected_month != "All":
-        filtered_data = filtered_data[filtered_data["Month"] == selected_month]
-    if selected_mentor != "All":
-        filtered_data = filtered_data[filtered_data["Mentor / Faculty"] == selected_mentor]
-    if selected_day != "All":
-        filtered_data = filtered_data[filtered_data["Day"] == selected_day]
-    if "Client" in df.columns and selected_client != "All":
-        filtered_data = filtered_data[filtered_data["Client"] == selected_client]
+    # Open workbook again to apply formatting
+    wb = load_workbook(target_file)
+    ws = wb[sheet_name]
 
-    # Display Filtered Data
-    st.dataframe(filtered_data, use_container_width=True)
+    # Auto-fit column width and row height
+    for col in ws.columns:
+        max_length = 0
+        col_letter = col[0].column_letter
+        for cell in col:
+            try:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            except:
+                pass
+        ws.column_dimensions[col_letter].width = max_length + 2
 
-    # Download Filtered Data
-    csv_data = filtered_data.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="📥 Download Filtered Data",
-        data=csv_data,
-        file_name="filtered_data.csv",
-        mime="text/csv"
-    )
+    for row in ws.iter_rows():
+        ws.row_dimensions[row[0].row].height = 20
 
-# ⚠️ Session Clashes Page
-elif page == "⚠️ Session Clashes":
-    st.title("⚠️ Session Clashes Detection")
-    clashes = df[df.duplicated(subset=["Date", "Session Time", "Mentor / Faculty"], keep=False)]
-    if not clashes.empty:
-        st.warning("⚠️ The following session clashes have been detected:")
-        st.dataframe(clashes, use_container_width=True)
-    else:
-        st.success("✅ No session clashes detected!")
+    # Apply orange fill to header row
+    fill = PatternFill(start_color="FFA500", end_color="FFA500", fill_type="solid")
+    for cell in ws[1]:
+        cell.fill = fill
 
-# Logout Button
-st.sidebar.markdown("---")
-if st.sidebar.button("🚪 Logout"):
-    st.session_state.authenticated = False
-    st.rerun()
+    # Save final changes
+    wb.save(target_file)
+    print(f"Data transferred and formatted successfully to {target_file}.")
+
+# Example usage - Updated with actual file paths
+source_file = "C:/Users/asus/OneDrive - NIIT Limited/Automation/Source_data.xlsx"
+target_file = "C:/Users/asus/OneDrive - NIIT Limited/Automation/Destination_data.xlsx"
+sheet_name = "Formatted Data"
+
+transfer_and_update_data(source_file, target_file, sheet_name)
